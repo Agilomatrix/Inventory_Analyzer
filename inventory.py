@@ -2761,9 +2761,6 @@ class InventoryManagementSystem:
             return
         # Debug: show sample keys to catch missing columns
         st.code(f"Sample columns: {list(analysis_results[0].keys())}" if analysis_results else "No data structure found.")
-
-        # Display advanced filtering options
-        self.display_advanced_filtering_options(analysis_results)
     
         # Apply filters to data
         df = pd.DataFrame(analysis_results)

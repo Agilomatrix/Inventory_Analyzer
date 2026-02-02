@@ -653,6 +653,10 @@ class InventoryManagementSystem:
             return
 
         if st.session_state.user_role is None:
+            # --- DEVELOPER CONSOLE VISIBLE AT LOGIN FOR REGISTRATION ---
+            self.developer_console()
+            st.sidebar.markdown("---")
+
             comp_id = st.sidebar.text_input("Company ID").upper().strip()
         
             # --- FORGOT PASSWORD BUTTON ---
@@ -722,12 +726,9 @@ class InventoryManagementSystem:
 
             st.sidebar.markdown("---")
             if st.sidebar.button("🚪 Logout"):
-                # This completely wipes the browser memory for this session
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
-    
-        self.developer_console()
     
     def developer_console(self):
         with st.sidebar.expander("🛠️ Developer Console"):
@@ -802,6 +803,7 @@ class InventoryManagementSystem:
         except Exception as e:
             st.error(f"Mail Error: {e}")
             return False
+            
     def handle_forgot_password_view(self, registry):
         st.title("🔑 Reset Password")
         comp_id = st.session_state.get('reset_target_id')
@@ -1360,7 +1362,6 @@ class InventoryManagementSystem:
     def user_inventory_upload(self):
         st.header("📦 User: Inventory Upload & Analysis")
         
-        # 1. Fetch the container (Dictionary)
         pfep_container = st.session_state.get('persistent_pfep_data')
         pfep_locked = st.session_state.get('persistent_pfep_locked', False)
         
@@ -1368,13 +1369,11 @@ class InventoryManagementSystem:
             st.error("❌ PFEP Master Data is not locked by Admin.")
             return
 
-        # 2. FIX: Extract the actual list of parts from the container
         if isinstance(pfep_container, dict) and 'data' in pfep_container:
             pfep_data = pfep_container['data']
         else:
-            pfep_data = pfep_container # Fallback for old list format
+            pfep_data = pfep_container 
 
-        # 3. UI for Inventory Upload
         uploaded_inv = st.file_uploader("Upload Current Inventory Dump", type=['xlsx', 'csv'], key="inv_up_user")
         
         if uploaded_inv:
@@ -1382,28 +1381,24 @@ class InventoryManagementSystem:
             standardized_inv = self.standardize_current_inventory(df_inv)
             
             if standardized_inv:
-                # MATCH CHECK (Now using the extracted list)
+                # --- ADD THIS LINE HERE TO FIX THE SIDEBAR STATUS ---
+                self.persistence.save_data_to_session_state('persistent_inventory_data', standardized_inv)
+                # ----------------------------------------------------
+
                 pfep_keys = set(str(item['Part_No']).strip().upper() for item in pfep_data)
                 inv_keys = set(str(item['Part_No']).strip().upper() for item in standardized_inv)
                 matches = pfep_keys.intersection(inv_keys)
                 
                 st.info(f"🔍 Match Check: Found {len(matches)} matching parts.")
 
-                # 4. RUN BUTTON (Passing the corrected list)
                 if st.button("🚀 Run Analysis", type="primary"):
                     current_tolerance = st.session_state.get('admin_tolerance', 30)
-                    results = self.analyzer.analyze_inventory(
-                        pfep_data, 
-                        standardized_inv, 
-                        tolerance=current_tolerance
-                    )
+                    results = self.analyzer.analyze_inventory(pfep_data, standardized_inv, tolerance=current_tolerance)
                     if results:
-                        # Save to the persistent key
                         st.session_state['persistent_analysis_results'] = results
                         st.success(f"✅ Analysis generated for {len(results)} items.")
-                        st.rerun() # Refresh to show the dashboard
+                        st.rerun()
 
-        # 5. SHOW DASHBOARD
         if st.session_state.get('persistent_analysis_results'):
             st.markdown("---")
             self.display_analysis_results()
@@ -1811,18 +1806,21 @@ class InventoryManagementSystem:
         
         self.authenticate_user()
 
-        # --- NEW LOGO UPLOADER SECTION ---
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("🖼️ Branding")
-        cust_logo = st.sidebar.file_uploader("Upload Customer Logo (Top Right)", type=['png', 'jpg', 'jpeg'])
-        if cust_logo:
-            st.session_state.customer_logo = cust_logo
-
+        # Restricted access to Branding and Admin Management
         if st.session_state.user_role == "Admin":
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("🖼️ Branding")
+            cust_logo = st.sidebar.file_uploader("Upload Customer Logo (Top Right)", type=['png', 'jpg', 'jpeg'])
+            if cust_logo:
+                st.session_state.customer_logo = cust_logo
+            
+            # Allow Admin to manage PFEP data
             self.admin_data_management()
+            
         elif st.session_state.user_role == "User":
+            # Normal user analysis flow
             self.user_inventory_upload()
-
+            
     def display_validation_results(self, validation_result):
         """Display inventory validation results"""
         st.markdown("**📋 Validation Results**")
@@ -1944,15 +1942,19 @@ class InventoryManagementSystem:
     def display_enhanced_export_options(self, analysis_results):
         st.subheader("📤 Export Analysis Results")
         df = pd.DataFrame(analysis_results)
+        
+        # --- REMOVE DUPLICATE STATUS COLUMN ---
+        if 'Status' in df.columns and 'INVENTORY REMARK STATUS' in df.columns:
+            df = df.drop(columns=['Status'])
+            
         col1, col2 = st.columns(2)
         with col1:
             excel_buffer = io.BytesIO()
             df.to_excel(excel_buffer, index=False)
-            st.download_button("📊 Download Excel", data=excel_buffer.getvalue(), file_name="inventory.xlsx")
+            st.download_button("📊 Download Excel", data=excel_buffer.getvalue(), file_name="inventory_analysis.xlsx")
         with col2:
             if st.button("📑 Generate Professional PPT Report"):
                 with st.spinner("Generating professional report..."):
-                    # This calls the detailed function below
                     ppt_file = self.generate_ppt_report(analysis_results)
                     st.download_button(
                         label="📥 Download PPT Report",
@@ -1962,164 +1964,77 @@ class InventoryManagementSystem:
                     )
         
     def display_enhanced_summary_metrics(self, analysis_results):
-        """Enhanced summary metrics dashboard - Fixed Width Issues"""
+        """Enhanced summary metrics dashboard with Missing Parts Math"""
         st.header("📊 Executive Summary Dashboard")
-        # Add CSS with better responsive design
+        
+        # 1. Fetch data for the Math
+        pfep_container = st.session_state.get('persistent_pfep_data')
+        pfep_list = pfep_container['data'] if isinstance(pfep_container, dict) else pfep_container
+        inv_list = self.persistence.load_data_from_session_state('persistent_inventory_data')
+        
+        pfep_count = len(pfep_list) if pfep_list else 0
+        inv_count = len(inv_list) if inv_list else 0
+        missing_count = max(0, pfep_count - inv_count)
+
+        # CSS Styling
         st.markdown("""
         <style>
         .metric-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 1.5rem; /* Increased from 1.2rem */
-            border-radius: 12px; /* Slightly more rounded */
-            margin: 0.5rem 0; /* Increased margin */
-            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.3); /* Enhanced shadow */
-            align: center;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            max-width: 100%;
-            box-sizing: border-box;
-            min-height: 140px; /* Increased from 120px */
-            transition: transform 0.2s ease; /* Added hover effect */
+            padding: 1.5rem; border-radius: 12px; margin: 0.5rem 0;
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.3); min-height: 140px;
         }
-        .metric-card:hover {
-            transform: translateY(-2px); /* Subtle lift on hover */
-        }
-        /* Status-specific styling remains the same */
         .status-normal { background: linear-gradient(135deg, #4CAF50, #45a049); }
         .status-excess { background: linear-gradient(135deg, #2196F3, #1976D2); }
         .status-short { background: linear-gradient(135deg, #F44336, #D32F2F); }
         .status-total { background: linear-gradient(135deg, #FF9800, #F57C00); }
-        .metric-value {
-            color: white;
-            font-weight: bold;
-            font-size: 1.6rem; /* Increased from 1.4rem */
-            margin-bottom: 0.4rem; /* Increased spacing */
-            word-wrap: break-word;
-            line-height: 1.2;
-        }
-        .metric-label {
-            color: #f0f0f0;
-            font-size: 1.1rem; /* Increased from 1.0rem */
-            margin-bottom: 0.5rem; /* Increased spacing */
-            word-wrap: break-word;
-            font-weight: 500; /* Added font weight */
-        }
-        .metric-delta {
-            color: #e0e0e0;
-            font-size: 0.9rem; /* Increased from 0.85rem */
-            word-wrap: break-word;
-            font-weight: 400;
-        }
+        .metric-value { color: white; font-weight: bold; font-size: 1.6rem; }
+        .metric-label { color: #f0f0f0; font-size: 1.1rem; }
         .highlight-box {
             background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            padding: 1.2rem; /* Increased padding */
-            border-radius: 12px; /* Consistent with cards */
-            color: white;
-            margin: 1rem 0; /* Increased margin */
-            max-width: 85%;
-            box-sizing: border-box;
-        }
-        .dashboard-container {
-            max-width: 85%; /* Increased from 80% for more space */
-            overflow-x: auto;
-            margin: 0 auto; /* Center the container */
-        }
-        /* Responsive adjustments */
-        @media (max-width: 768px) {
-            .metric-card {
-                min-height: 100px;
-                padding: 1rem;
-            }
-            .metric-value {
-                font-size: 1.3rem;
-            }
-            .metric-label {
-                font-size: 0.9rem;
-            }
-            .dashboard-container {
-                max-width: 95%;
-            }
+            padding: 1.2rem; border-radius: 12px; color: white; margin: 1rem 0;
         }
         </style>
         """, unsafe_allow_html=True)
-        # Wrap everything in a container with 70% max width
-        st.markdown('<div class="dashboard-container">', unsafe_allow_html=True)
-        # DataFrame prep
+
         df = pd.DataFrame(analysis_results)
-        # Identify value and status columns
         value_col = 'Stock Deviation Value'
         status_col = 'Status' if 'Status' in df.columns else 'INVENTORY REMARK STATUS'
-        # Compute KPI values safely
-        if not df.empty and value_col in df.columns and status_col in df.columns:
-            short_value = df[df[status_col] == 'Short Inventory'][value_col].sum()
-            excess_value = df[df[status_col] == 'Excess Inventory'][value_col].sum()
-        else:
-            short_value = 0
-            excess_value = 0
-        # Total values
-        total_parts = len(df)
-        inventory_value_col = next((col for col in [
-            'Current Inventory - VALUE', 'Stock_Value', 'VALUE'
-        ] if col in df.columns), None)
-        total_stock_value = df[inventory_value_col].sum() if inventory_value_col else 0
+        
+        short_value = df[df[status_col] == 'Short Inventory'][value_col].sum() if not df.empty else 0
+        excess_value = df[df[status_col] == 'Excess Inventory'][value_col].sum() if not df.empty else 0
+        
+        inv_val_col = next((c for c in ['Current Inventory - VALUE', 'Stock_Value'] if c in df.columns), None)
+        total_stock_value = df[inv_val_col].sum() if inv_val_col else 0
+
+        # math display in the highlight box
         st.markdown('<div class="highlight-box">', unsafe_allow_html=True)
         st.markdown(f"""
         ### 🎯 Key Inventory KPIs
-        - **Total Parts Analyzed**: {total_parts:,}
-        - **Total Inventory Value**: ₹{total_stock_value:,.0f}
-        - **Short Inventory Impact**: ₹{abs(short_value):,.0f}
-        - **Excess Inventory Impact**: ₹{excess_value:,.0f}
-        - **Net Financial Impact**: ₹{abs(short_value) - excess_value:,.0f}
+        - **Total Master PFEP Parts**: {pfep_count:,}
+        - **Parts in Current Inventory**: {inv_count:,}
+        - **Missing Parts calculation**: {pfep_count:,} (PFEP) - {inv_count:,} (Inv) = **{missing_count:,} Missing Parts**
+        - **Total Stock Value**: ₹{total_stock_value:,.0f}
+        - **Shortage Impact**: ₹{abs(short_value):,.0f} | **Excess Impact**: ₹{excess_value:,.0f}
         """)
         st.markdown('</div>', unsafe_allow_html=True)
-        # Status breakdown
-        status_values = {}
-        for label in ['Within Norms', 'Excess Inventory', 'Short Inventory']:
-            filtered = df[df[status_col] == label]
-            status_values[label] = {
-                'count': len(filtered),
-                'value': filtered[inventory_value_col].sum() if inventory_value_col in filtered.columns else 0
-            }
-        # Display 4 columns
-        cols = st.columns([1, 1, 1, 1])
-        with cols[0]:
-            norm = status_values.get('Within Norms', {'count': 0, 'value': 0})
-            st.markdown(f"""
-            <div class="metric-card status-normal">
-                <div class="metric-label">🟢 Within Norms</div>
-                <div class="metric-value">{norm['count']} parts</div>
-                <div class="metric-delta">₹{norm['value']:,.0f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with cols[1]:
-            excess = status_values.get('Excess Inventory', {'count': 0, 'value': 0})
-            st.markdown(f"""
-            <div class="metric-card status-excess">
-                <div class="metric-label">🔵 Excess Inventory</div>
-                <div class="metric-value">{excess['count']} parts</div>
-                <div class="metric-delta">₹{excess['value']:,.0f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with cols[2]:
-            short = status_values.get('Short Inventory', {'count': 0, 'value': 0})
-            st.markdown(f"""
-            <div class="metric-card status-short">
-                <div class="metric-label">🔴 Short Inventory</div>
-                <div class="metric-value">{short['count']} parts</div>
-                <div class="metric-delta">₹{short['value']:,.0f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with cols[3]:
-            st.markdown(f"""
-            <div class="metric-card status-total">
-                <div class="metric-label">📊 Total Inventory</div>
-                <div class="metric-value">{total_parts} parts</div>
-                <div class="metric-delta">₹{total_stock_value:,.0f}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        # Close the container
-        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Status cards
+        cols = st.columns(4)
+        status_map = [
+            ('Within Norms', '🟢 Within Norms', 'status-normal'),
+            ('Excess Inventory', '🔵 Excess Inventory', 'status-excess'),
+            ('Short Inventory', '🔴 Short Inventory', 'status-short')
+        ]
+        
+        for i, (stat, label, css) in enumerate(status_map):
+            filt = df[df[status_col] == stat]
+            val = filt[inv_val_col].sum() if inv_val_col in filt.columns else 0
+            cols[i].markdown(f"""<div class="metric-card {css}"><div class="metric-label">{label}</div>
+            <div class="metric-value">{len(filt)} parts</div><div style='color:white'>₹{val:,.0f}</div></div>""", unsafe_allow_html=True)
+        
+        cols[3].markdown(f"""<div class="metric-card status-total"><div class="metric-label">📊 Total Analyzed</div>
+        <div class="metric-value">{len(df)} parts</div><div style='color:white'>₹{total_stock_value:,.0f}</div></div>""", unsafe_allow_html=True)
             
     def display_enhanced_vendor_summary(self, analysis_results):
         """Enhanced vendor summary with better analytics"""
@@ -2456,6 +2371,34 @@ class InventoryManagementSystem:
             textposition='auto',
         ))
         st.plotly_chart(fig, use_container_width=True)
+        
+    def apply_advanced_filters(self, df):
+        """Apply advanced filters to dataframe"""
+        filtered_df = df.copy()
+        # Apply value filted
+        if hasattr(st.session_state, 'value_filter') and 'Current Inventory - VALUE' in df.columns:
+            min_val, max_val = st.session_state.value_filter
+            filtered_df = filtered_df[
+                (filtered_df['Current Inventory - VALUE'] >= min_val) & 
+                (filtered_df['Current Inventory - VALUE'] <= max_val)
+            ]
+        # Apply quantity filter
+        if hasattr(st.session_state, 'qty_filter') and 'Current Inventory - Qty' in df.columns:
+            min_qty, max_qty = st.session_state.qty_filter
+            filtered_df = filtered_df[
+                (filtered_df['Current Inventory - Qty'] >= min_qty) & 
+                (filtered_df['Current Inventory - Qty'] <= max_qty)
+            ]
+        # Apply vendor filter (FIXED: properly handle vendor column)
+        if hasattr(st.session_state, 'vendor_filter'):
+            vendor_col = None
+            if 'Vendor' in df.columns:
+                vendor_col = 'Vendor'
+            elif 'Vendor Name' in df.columns:
+                vendor_col = 'Vendor Name'
+            if vendor_col and vendor_col in df.columns:
+                filtered_df = filtered_df[filtered_df[vendor_col].isin(st.session_state.vendor_filter)]
+        return filtered_df
             
     def display_trend_analysis(self, analysis_results):
         """
@@ -2556,10 +2499,17 @@ class InventoryManagementSystem:
             st.success(f"✅ No items found in the '{selected_cat}' category.")
             
     def export_comprehensive_report(self, analysis_results):
-        """Export comprehensive analysis report"""
+        """Export comprehensive analysis report without duplicate status"""
         try:
             df = pd.DataFrame(analysis_results)
-            # Create Excel writer
+            
+            # --- REMOVE DUPLICATE STATUS COLUMN ---
+            if 'Status' in df.columns and 'INVENTORY REMARK STATUS' in df.columns:
+                df = df.drop(columns=['Status'])
+                
+            # Define status column name after dropping
+            status_col = 'INVENTORY REMARK STATUS'
+            
             from io import BytesIO
             output = BytesIO()
         
@@ -2568,23 +2518,23 @@ class InventoryManagementSystem:
                 df.to_excel(writer, sheet_name='Full Analysis', index=False)
                 # Summary sheet
                 summary_data = {
-                    'Status': df['Status'].value_counts().index.tolist(),
-                    'Count': df['Status'].value_counts().values.tolist(),
-                    'Total Value': [df[df['Status'] == status]['Current Inventory - VALUE'].sum() 
-                                    for status in df['Status'].value_counts().index]
+                    'Status': df[status_col].value_counts().index.tolist(),
+                    'Count': df[status_col].value_counts().values.tolist(),
+                    'Total Value': [df[df[status_col] == s]['Current Inventory - VALUE'].sum() 
+                                    for s in df[status_col].value_counts().index]
                 }
                 pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
                 # Critical items sheet
                 critical_items = df[df['Current Inventory - VALUE'] > 100000]
                 critical_items.to_excel(writer, sheet_name='Critical Items', index=False)
-                # Download button
-                st.download_button(
-                    label="📥 Download Comprehensive Report",
-                    data=output.getvalue(),
-                    file_name=f"inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                st.success("✅ Comprehensive report prepared for download!")
+                
+            st.download_button(
+                label="📥 Download Comprehensive Report",
+                data=output.getvalue(),
+                file_name=f"inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            st.success("✅ Comprehensive report prepared for download!")
         except Exception as e:
             st.error(f"❌ Export failed: {str(e)}")
             
@@ -2710,7 +2660,163 @@ class InventoryManagementSystem:
             4. **Action Items**: Follow up on recommendations
             5. **Trend Analysis**: Monitor patterns over time
             """)
-            
+        
+                
+    def display_advanced_filtering_options(self, analysis_results):
+        """Display advanced filtering options in sidebar"""
+        st.sidebar.header("🔍 Advanced Filters")
+        df = pd.DataFrame(analysis_results)
+        # Value range filter with proper handling of edge cases
+        if 'Current Inventory - VALUE' in df.columns and not df['Current Inventory - VALUE'].empty:
+            min_value = float(df['Current Inventory - VALUE'].min())
+            max_value = float(df['Current Inventory - VALUE'].max())
+        # Handle case where min and max are the same
+            if min_value == max_value:
+                if min_value == 0:
+                    # If all values are 0, create a reasonable range
+                    min_value = 0.0
+                    max_value = 100000.0
+                    st.sidebar.info("ℹ️ All stock values are 0. Using default range for filtering.")
+                else:
+                    # If all values are the same non-zero value, create a small range around i
+                    range_buffer = max_value * 0.1 if max_value > 0 else 1000
+                    min_value = max_value - range_buffer
+                    max_value = max_value + range_buffer
+                    st.sidebar.info(f"ℹ️ All stock values are {df['Current Inventory - VALUE'].iloc[0]:,.0f}. Adjusted range for filtering.")
+            # Ensure min_value is always less than max_value
+            if min_value >= max_value:
+                max_value = min_value + 1000
+            value_range = st.sidebar.slider(
+                "Stock Value Range (₹)",
+                min_value=min_value,
+                max_value=max_value,
+                value=(min_value, max_value),
+                format="₹%.0f"
+            )
+        else:
+            st.sidebar.warning("⚠️ Stock Value column not found or empty. Skipping value filter.")
+            value_range = (0, 100000)  # Default range
+        # Status filter
+        if 'Status' in df.columns:
+            status_options = df['Status'].unique().tolist()
+            selected_statuses = st.sidebar.multiselect(
+                "Filter by Status",
+                options=status_options,
+                default=status_options
+            )
+        else:
+            selected_statuses = []
+            st.sidebar.warning("⚠️ Status column not found.")
+        # Category filter (if available)
+        category_col = None
+        if 'Category' in df.columns:
+            category_col = 'Category'
+        elif 'PART CATEGORY' in df.columns:
+            category_col = 'PART CATEGORY'
+        selected_categories = None
+        if category_col and category_col in df.columns:
+            categories = df[category_col].dropna().unique().tolist()
+            if categories:
+                selected_categories = st.sidebar.multiselect(
+                    f"Filter by {category_col}",
+                    options=categories,
+                    default=categories
+                )
+            else:
+                st.sidebar.info(f"ℹ️ No valid {category_col} values found.")
+        # Vendor filter (if availablee)
+        vendor_col = None
+        if 'Vendor' in df.columns:
+            vendor_col = 'Vendor'
+        elif 'Vendor Name' in df.columns:
+            vendor_col = 'Vendor Name'
+        elif 'VENDOR' in df.columns:
+            vendor_col = 'VENDOR'
+        selected_vendors = None
+        if vendor_col and vendor_col in df.columns:
+            vendors = df[vendor_col].dropna().unique().tolist()
+            if vendors:
+                selected_vendors = st.sidebar.multiselect(
+                    f"Filter by {vendor_col}",
+                    options=vendors,
+                    default=vendors
+                )
+            else:
+                st.sidebar.info(f"ℹ️ No valid {vendor_col} values found.")
+        # Critical threshold setting
+        critical_threshold = st.sidebar.number_input(
+            "Critical Value Threshold (₹)",
+            min_value=0,
+            value=100000,
+            step=10000,
+            help="Parts above this value are considered critical"
+        )
+        # Store filter values in session state
+        st.session_state.filter_value_range = value_range
+        st.session_state.filter_statuses = selected_statuses
+        st.session_state.filter_categories = selected_categories
+        st.session_state.filter_vendors = selected_vendors
+        st.session_state.critical_threshold = critical_threshold
+        # Display current filter summary
+        with st.sidebar.expander("📋 Current Filters Summary"):
+            st.write(f"**Value Range:** ₹{value_range[0]:,.0f} - ₹{value_range[1]:,.0f}")
+            st.write(f"**Statuses:** {len(selected_statuses) if selected_statuses else 0} selected")
+            if selected_categories:
+                st.write(f"**Categories:** {len(selected_categories)} selected")
+            if selected_vendors:
+                st.write(f"**Vendors:** {len(selected_vendors)} selected")
+            st.write(f"**Critical Threshold:** ₹{critical_threshold:,.0f}")
+
+    def apply_advanced_filters(self, df):
+        """Apply advanced filters to the dataframe with improved error handling"""
+        filtered_df = df.copy()
+        try:
+            # Apply value range filter
+            if (hasattr(st.session_state, 'filter_value_range') and 
+                'Current Inventory - VALUE' in filtered_df.columns):
+                    min_val, max_val = st.session_state.filter_value_range
+                    filtered_df = filtered_df[
+                        (filtered_df['Current Inventory - VALUE'] >= min_val) & 
+                        (filtered_df['Current Inventory - VALUE'] <= max_val)
+                    ]
+            # Apply status filter
+            if (hasattr(st.session_state, 'filter_statuses') and 
+                st.session_state.filter_statuses and 
+                'Status' in filtered_df.columns):
+                    filtered_df = filtered_df[filtered_df['Status'].isin(st.session_state.filter_statuses)]
+            # Apply category filter
+            if (hasattr(st.session_state, 'filter_categories') and 
+                st.session_state.filter_categories):
+                    category_col = None
+                    if 'Category' in filtered_df.columns:
+                        category_col = 'Category'
+                    elif 'PART CATEGORY' in filtered_df.columns:
+                        category_col = 'PART CATEGORY'
+                    if category_col:
+                        filtered_df = filtered_df[filtered_df[category_col].isin(st.session_state.filter_categories)]
+            # Apply vendor filter
+            if (hasattr(st.session_state, 'filter_vendors') and 
+                st.session_state.filter_vendors):
+                    vendor_col = None
+                    if 'Vendor' in filtered_df.columns:
+                        vendor_col = 'Vendor'
+                    elif 'Vendor Name' in filtered_df.columns:
+                        vendor_col = 'Vendor Name'
+                    elif 'VENDOR' in filtered_df.columns:
+                        vendor_col = 'VENDOR'
+                    if vendor_col:
+                        filtered_df = filtered_df[filtered_df[vendor_col].isin(st.session_state.filter_vendors)]
+            # Show filtering results
+            original_count = len(df)
+            filtered_count = len(filtered_df)
+            if original_count != filtered_count:
+                st.sidebar.success(f"✅ Filtered: {filtered_count:,} of {original_count:,} items")
+            return filtered_df
+        except Exception as e:
+            st.sidebar.error(f"❌ Filter error: {str(e)}")
+            st.sidebar.info("ℹ️ Returning unfiltered data")
+            return df
+
     def generate_analysis_summary(self, analysis_results):
         """Generate a comprehensive analysis summary"""
         df = pd.DataFrame(analysis_results)
@@ -2759,24 +2865,19 @@ class InventoryManagementSystem:
         if not analysis_results:
             st.warning("⚠️ No analysis results available yet. Please upload inventory and click 'Run Analysis'.")
             return
-        # Debug: show sample keys to catch missing columns
-        st.code(f"Sample columns: {list(analysis_results[0].keys())}" if analysis_results else "No data structure found.")
-    
-        # Apply filters to data
-        df = pd.DataFrame(analysis_results)
-        if 'Current Inventory - VALUE' not in df.columns:
-            st.warning("⚠️ 'Current Inventory - VALUE' column missing from results. Some features may not work.")
 
-        filtered_df = self.apply_advanced_filters(df)
-        filtered_results = filtered_df.to_dict('records')
+        # Define the results to be used by the charts below
+        # This bypasses the sidebar filtering logic entirely
+        filtered_results = analysis_results
     
-        # Display main dashboard
+        # Display main dashboard metrics and tables
         self.display_comprehensive_analysis(filtered_results)
     
-        # Additional analysis sections
+        # Display the coverage report and charts
         st.markdown("---")
         self.display_trend_analysis(filtered_results)
     
+        # Display help section
         st.markdown("---")
         self.display_help_and_documentation()
         
@@ -2791,472 +2892,195 @@ class InventoryManagementSystem:
         with col2:
             top_n = st.slider("Number of items to show:", min_value=5, max_value=50, value=10, step=5, key="top_n_slider")
         
-        # ✅ Get Admin Configured Ideal Days (Default to 30 if not set)
+        # ✅ Get Admin Configured Ideal Days
         ideal_days = st.session_state.get('user_preferences', {}).get('ideal_inventory_days', 30)
         
-        # ✅ FIXED: Define format_key variable to prevent NameError
         if chart_unit == "Millions":
             divisor = 1_000_000
             suffix = "M"
             unit_name = "Millions"
-            format_key = "millions" 
         else:
             divisor = 100_000
             suffix = "L"
             unit_name = "Lakhs"
-            format_key = "lakhs"
             
         df = pd.DataFrame(analysis_results)
         if df.empty:
             st.warning("⚠️ No data available for charts.")
             return
             
-        # ✅ 1. Top N Parts by Value (with Ideal Inventory Overlay)
-        value_col = None
-        for col in ['Current Inventory - VALUE', 'Stock_Value', 'Current Inventory-VALUE']:
-            if col in df.columns:
-                value_col = col
-                break
+        # Identify value column
+        value_col = next((col for col in ['Current Inventory - VALUE', 'Stock_Value', 'Current Inventory-VALUE'] if col in df.columns), None)
                 
         if value_col and 'PART NO' in df.columns and 'PART DESCRIPTION' in df.columns:
-            # Filter top N parts with non-zero value
-            chart_data = (
-                df[df[value_col] > 0]
-                .sort_values(by=value_col, ascending=False)
-                .head(top_n)
-                .copy()
-            )
-            # Convert to selected unit
+            st.markdown(f"### 🏆 Top {top_n} Parts by Value")
+            chart_data = df[df[value_col] > 0].sort_values(by=value_col, ascending=False).head(top_n).copy()
             chart_data['Value_Converted'] = chart_data[value_col] / divisor
             
-            # ✅ CALCULATE IDEAL INVENTORY & DEVIATION
             def calculate_ideal_metrics(row):
                 try:
                     avg_consumption = float(row.get('AVG CONSUMPTION/DAY', 0) or 0)
                     unit_price = float(row.get('UNIT PRICE', 0) or 0)
                     current_qty = float(row.get('Current Inventory - Qty', 0) or 0)
-                    
-                    # Ideal Inventory Calculation
                     ideal_qty = avg_consumption * ideal_days
-                    ideal_value = ideal_qty * unit_price
-                    ideal_value_converted = ideal_value / divisor
-                    
-                    # Deviation % Calculation
-                    if ideal_qty > 0:
-                        deviation_pct = ((current_qty - ideal_qty) / ideal_qty) * 100
-                    else:
-                        deviation_pct = 0
-                        
+                    ideal_value_converted = (ideal_qty * unit_price) / divisor
+                    deviation_pct = ((current_qty - ideal_qty) / ideal_qty * 100) if ideal_qty > 0 else 0
                     return ideal_qty, ideal_value_converted, deviation_pct
-                except:
-                    return 0, 0, 0
+                except: return 0, 0, 0
 
-            # Apply calculations
             metrics = chart_data.apply(calculate_ideal_metrics, axis=1, result_type='expand')
-            chart_data['Ideal_Qty'] = metrics[0]
-            chart_data['Ideal_Value_Converted'] = metrics[1]
-            chart_data['Deviation_Pct'] = metrics[2]
-
-            # Combine description and part no
-            chart_data['Part'] = chart_data.apply(
-                lambda row: f"{row['PART DESCRIPTION']}\n({row['PART NO']})",
-                axis=1
-            )
+            chart_data['Ideal_Qty'], chart_data['Ideal_Value_Converted'], chart_data['Deviation_Pct'] = metrics[0], metrics[1], metrics[2]
+            chart_data['Part'] = chart_data.apply(lambda row: f"{row['PART DESCRIPTION']}\n({row['PART NO']})", axis=1)
+            chart_data['Inventory_Status'] = chart_data['Status'] if 'Status' in chart_data.columns else 'Within Norms'
             
-            # Use the Status column
-            if 'Status' in chart_data.columns:
-                chart_data['Inventory_Status'] = chart_data['Status']
-            elif 'INVENTORY REMARK STATUS' in chart_data.columns:
-                chart_data['Inventory_Status'] = chart_data['INVENTORY REMARK STATUS']
-            else:
-                chart_data['Inventory_Status'] = 'Within Norms' # Fallback
-            
-            color_map = {
-                "Excess Inventory": "#2196F3",
-                "Short Inventory": "#F44336", 
-                "Within Norms": "#4CAF50"
-            }
-            
-            # ✅ Enhanced hover text with Ideal Inventory Details
+            color_map = {"Excess Inventory": "#2196F3", "Short Inventory": "#F44336", "Within Norms": "#4CAF50"}
             chart_data['HOVER_TEXT'] = chart_data.apply(lambda row: (
-                f"Description: {row['PART DESCRIPTION']}<br>"
-                f"Part No: {row['PART NO']}<br>"
-                f"<b>Current Status: {row['Inventory_Status']}</b><br>"
-                f"--------------------------------<br>"
-                f"Current Qty: {row.get('Current Inventory - Qty', 0):,.0f}<br>"
-                f"Current Value: ₹{row[value_col]:,.0f}<br>"
-                f"--------------------------------<br>"
-                f"<b>Ideal Inventory (Based on {ideal_days} Days):</b><br>"
-                f"Avg Daily Cons: {row.get('AVG CONSUMPTION/DAY', 0):.2f}<br>"
-                f"Ideal Qty: {row['Ideal_Qty']:,.0f}<br>"
-                f"<b>Deviation: {row['Deviation_Pct']:.1f}%</b>"
+                f"Description: {row['PART DESCRIPTION']}<br>Part No: {row['PART NO']}<br><b>Current Status: {row['Inventory_Status']}</b><br>"
+                f"--------------------------------<br>Current Qty: {row.get('Current Inventory - Qty', 0):,.0f}<br>Current Value: ₹{row[value_col]:,.0f}<br>"
+                f"--------------------------------<br><b>Ideal Target ({ideal_days} Days):</b><br>Ideal Qty: {row['Ideal_Qty']:,.0f}<br><b>Deviation: {row['Deviation_Pct']:.1f}%</b>"
             ), axis=1)
-            
-            chart_data['Bar_Color'] = chart_data['Inventory_Status'].map(color_map)
-    
-            # Create Figure
+
             fig1 = go.Figure()
-            
-            # 1. Add Bar Chart Traces (Original Logic)
             for i, row in chart_data.iterrows():
-                fig1.add_trace(go.Bar(
-                    x=[row['Part']],
-                    y=[row['Value_Converted']],
-                    name=row['Inventory_Status'],
-                    marker_color=row['Bar_Color'],
-                    customdata=[row['HOVER_TEXT']],
-                    hovertemplate='<b>%{x}</b><br>%{customdata}<extra></extra>',
-                    showlegend=False
-                ))
+                fig1.add_trace(go.Bar(x=[row['Part']], y=[row['Value_Converted']], name=row['Inventory_Status'], marker_color=color_map.get(row['Inventory_Status'], "#4CAF50"), customdata=[row['HOVER_TEXT']], hovertemplate='<b>%{x}</b><br>%{customdata}<extra></extra>', showlegend=False))
             
-            # 2. Add Legend Proxies (Original Logic)
             for status, color in color_map.items():
-                fig1.add_trace(go.Bar(
-                    x=[None],
-                    y=[None],
-                    name=status,
-                    marker_color=color,
-                    showlegend=True
-                ))
+                fig1.add_trace(go.Bar(x=[None], y=[None], name=status, marker_color=color, showlegend=True))
                 
-            # ✅ 3. ADD IDEAL INVENTORY LINE OVERLAY (Black Thin Line)
-            fig1.add_trace(go.Scatter(
-                x=chart_data['Part'],
-                y=chart_data['Ideal_Value_Converted'],
-                mode='lines+markers',
-                name=f'Ideal Inventory ({ideal_days} Days)',
-                line=dict(color='black', width=1.5), 
-                marker=dict(symbol='circle', size=5, color='black'),
-                hovertemplate=(
-                    f"<b>Ideal Inventory Target</b><br>" +
-                    f"Value: %{{y:.2f}} {suffix}<br>" +
-                    "<extra></extra>"
-                )
-            ))
-
-            fig1.update_layout(
-                title=f"Top {top_n} Parts by Stock Value vs Ideal Inventory Target",
-                xaxis_title="Parts",
-                yaxis_title=f"Stock Value (in ₹ {unit_name})",
-                xaxis_tickangle=-45,
-                yaxis=dict(tickformat=',.1f', ticksuffix=suffix),
-                xaxis=dict(tickfont=dict(size=10)),
-                height=600, # Explicit height to maintain size
-                showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
+            fig1.add_trace(go.Scatter(x=chart_data['Part'], y=chart_data['Ideal_Value_Converted'], mode='lines+markers', name=f'Ideal Inventory', line=dict(color='black', width=1.5), marker=dict(symbol='circle', size=5, color='black'), hovertemplate=f"<b>Ideal Target</b><br>Value: %{{y:.2f}} {suffix}<extra></extra>"))
+            fig1.update_layout(title=f"Top {top_n} Parts Actual Value vs Ideal Target", xaxis_title="Parts", yaxis_title=f"Stock Value (₹ {unit_name})", xaxis_tickangle=-45, yaxis=dict(tickformat=',.1f', ticksuffix=suffix), height=600, showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig1, use_container_width=True)
-        else:
-            st.warning("⚠️ Required columns for parts value chart not found.")
 
-        # ✅ 2. Vendor vs Value (with Ideal Inventory Overlay)
+        # ✅ 2. Vendor vs Value
         vendor_col = next((col for col in ['Vendor', 'Vendor Name', 'VENDOR'] if col in df.columns), None)
-        if vendor_col and value_col and vendor_col in df.columns:
+        if vendor_col and value_col:
+            st.markdown(f"### 🏢 Top {top_n} Vendors by Value")
             vendor_data = []
-            
-            # Group calculation to include Ideal Value per Vendor
             for vendor_name, vendor_group in df[df[value_col] > 0].groupby(vendor_col):
                 total_value = vendor_group[value_col].sum()
-                
-                # Calculate Ideal Value for the whole vendor (Sum of parts)
-                vendor_ideal_value_sum = 0
-                for _, v_row in vendor_group.iterrows():
-                     ac = float(v_row.get('AVG CONSUMPTION/DAY', 0) or 0)
-                     up = float(v_row.get('UNIT PRICE', 0) or 0)
-                     vendor_ideal_value_sum += (ac * ideal_days * up)
-
-                if 'Status' in vendor_group.columns:
-                    status_counts = vendor_group['Status'].value_counts()
-                else:
-                    status_counts = pd.Series([0]) # Fallback
-
-                vendor_status = status_counts.index[0] if not status_counts.empty else 'Within Norms'
-                
-                vendor_data.append({
-                    vendor_col: vendor_name,
-                    value_col: total_value,
-                    'Ideal_Value': vendor_ideal_value_sum,
-                    'Vendor_Status': vendor_status
-                })
+                vendor_ideal_value_sum = sum(float(v.get('AVG CONSUMPTION/DAY', 0) or 0) * ideal_days * float(v.get('UNIT PRICE', 0) or 0) for _, v in vendor_group.iterrows())
+                v_status = vendor_group['Status'].value_counts().index[0] if 'Status' in vendor_group.columns and not vendor_group['Status'].empty else 'Within Norms'
+                vendor_data.append({vendor_col: vendor_name, value_col: total_value, 'Ideal_Value': vendor_ideal_value_sum, 'Vendor_Status': v_status})
             
             vendor_df = pd.DataFrame(vendor_data).sort_values(by=value_col, ascending=False).head(top_n)
-            
             if not vendor_df.empty:
                 vendor_df['Value_Converted'] = vendor_df[value_col] / divisor
                 vendor_df['Ideal_Value_Converted'] = vendor_df['Ideal_Value'] / divisor
+                vendor_df['Deviation_Pct'] = vendor_df.apply(lambda r: ((r[value_col] - r['Ideal_Value']) / r['Ideal_Value'] * 100) if r['Ideal_Value'] > 0 else 0, axis=1)
                 
-                # Calculate Deviation % for Vendor
-                vendor_df['Deviation_Pct'] = vendor_df.apply(
-                    lambda r: ((r[value_col] - r['Ideal_Value']) / r['Ideal_Value'] * 100) if r['Ideal_Value'] > 0 else 0, 
-                    axis=1
-                )
-
-                color_map = {"Excess Inventory": "#2196F3", "Short Inventory": "#F44336", "Within Norms": "#4CAF50"}
+                vendor_df['HOVER_TEXT'] = vendor_df.apply(lambda row: (f"Vendor: {row[vendor_col]}<br>Actual Value: ₹{row[value_col]:,.0f}<br>Ideal Value: ₹{row['Ideal_Value']:,.0f}<br>Deviation: {row['Deviation_Pct']:.1f}%<br>Status: {row['Vendor_Status']}"), axis=1)
                 
-                # ✅ Enhanced Hover for Vendor
-                vendor_df['HOVER_TEXT'] = vendor_df.apply(lambda row: (
-                    f"Vendor: {row[vendor_col]}<br>"
-                    f"Actual Value: ₹{row[value_col]:,.0f}<br>"
-                    f"Ideal Value: ₹{row['Ideal_Value']:,.0f}<br>"
-                    f"Deviation: {row['Deviation_Pct']:.1f}%<br>"
-                    f"Status: {row['Vendor_Status']}"
-                ), axis=1)
-                
-                vendor_df['Bar_Color'] = vendor_df['Vendor_Status'].map(color_map)
-        
-                fig3 = go.Figure()
-                
-                # Bar Traces
+                fig2 = go.Figure()
                 for i, row in vendor_df.iterrows():
-                    fig3.add_trace(go.Bar(
-                        x=[row[vendor_col]],
-                        y=[row['Value_Converted']],
-                        name=row['Vendor_Status'],
-                        marker_color=row['Bar_Color'],
-                        customdata=[row['HOVER_TEXT']],
-                        hovertemplate='%{customdata}<extra></extra>',
-                        showlegend=False
-                    ))
+                    fig2.add_trace(go.Bar(x=[row[vendor_col]], y=[row['Value_Converted']], name=row['Vendor_Status'], marker_color=color_map.get(row['Vendor_Status'], "#4CAF50"), customdata=[row['HOVER_TEXT']], hovertemplate='%{customdata}<extra></extra>', showlegend=False))
                 
-                # Legend Proxies
-                for status, color in color_map.items():
-                    fig3.add_trace(go.Bar(x=[None], y=[None], name=status, marker_color=color, showlegend=True))
-                
-                # ✅ ADD IDEAL INVENTORY LINE OVERLAY (VENDOR)
-                fig3.add_trace(go.Scatter(
-                    x=vendor_df[vendor_col],
-                    y=vendor_df['Ideal_Value_Converted'],
-                    mode='lines+markers',
-                    name=f'Ideal Inventory ({ideal_days} Days)',
-                    line=dict(color='black', width=1.5),
-                    marker=dict(symbol='circle', size=5, color='black'),
-                    hovertemplate='<b>Ideal Target</b><br>Value: %{y:.2f} ' + suffix + '<extra></extra>'
-                ))
+                fig2.add_trace(go.Scatter(x=vendor_df[vendor_col], y=vendor_df['Ideal_Value_Converted'], mode='lines+markers', name=f'Ideal Inventory', line=dict(color='black', width=1.5), marker=dict(symbol='circle', size=5, color='black')))
+                fig2.update_layout(title=f'Top {top_n} Vendors Actual Value vs Ideal Target', xaxis_title="Vendors", yaxis_title=f"Inventory Value (₹ {unit_name})", xaxis_tickangle=-45, yaxis=dict(tickformat=',.1f', ticksuffix=suffix), height=600, showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig2, use_container_width=True)
 
-                fig3.update_layout(
-                    title=f'Top {top_n} Vendors by Stock Value vs Ideal Inventory',
-                    xaxis_title="Vendors",
-                    yaxis_title=f"Inventory Value (in ₹ {unit_name})",
-                    xaxis_tickangle=-45,
-                    yaxis=dict(tickformat=',.1f', ticksuffix=suffix),
-                    height=600, # Explicit height
-                    showlegend=True,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
-                st.plotly_chart(fig3, use_container_width=True)
-            else:
-                st.info("ℹ️ No valid vendor data found.")
-        else:
-            st.warning(f"⚠️ Vendor analysis chart cannot be displayed.")
-            
         # ✅ 3. Top N Parts by Inventory Status
         try:
             st.markdown(f"## 🧩 Top {top_n} Parts by Inventory Status") 
-            if 'PART NO' not in df.columns or 'Stock Deviation Value' not in df.columns:
-                st.warning("⚠️ Required columns missing for top parts chart.")
-                return
-            status_colors = {
-                "Excess Inventory": "#2196F3",
-                "Short Inventory": "#F44336"
-            }
-            for status, label, color in [
-                ("Excess Inventory", f"🔵 Top {top_n} Excess Inventory Parts", status_colors["Excess Inventory"]),
-                ("Short Inventory", f"🔴 Top {top_n} Short Inventory Parts", status_colors["Short Inventory"]),
-            ]:
+            status_colors = {"Excess Inventory": "#2196F3", "Short Inventory": "#F44336"}
+            for status, label, color in [("Excess Inventory", f"🔵 Top {top_n} Excess Inventory Parts", status_colors["Excess Inventory"]), ("Short Inventory", f"🔴 Top {top_n} Short Inventory Parts", status_colors["Short Inventory"])]:
                 st.subheader(label)
-                if status == "Excess Inventory":
-                    st.markdown(f'<div class="graph-description">Top {top_n} parts with highest excess inventory value (₹ above allowed norm).</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="graph-description">Top {top_n} parts with highest shortage value (₹ below required norm).</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="graph-description">Top {top_n} parts with highest {status.lower()} value compared to target.</div>', unsafe_allow_html=True)
                 
-                status_df = df[df['INVENTORY REMARK STATUS'] == status]
+                status_df = df[df['INVENTORY REMARK STATUS'] == status].copy()
                 if status == "Excess Inventory":
-                    status_df = status_df[status_df['Stock Deviation Value'] > 0]
-                    status_df = status_df.sort_values(by='Stock Deviation Value', ascending=False).head(top_n)
-                    chart_title = f"Top {top_n} Excess Inventory Parts (₹ Excess Value in {unit_name})"
-                    y_title = f"Excess Inventory Value (₹ {unit_name})"
-                elif status == "Short Inventory":
+                    status_df = status_df[status_df['Stock Deviation Value'] > 0].sort_values(by='Stock Deviation Value', ascending=False).head(top_n)
+                else:
                     status_df = status_df[status_df['Stock Deviation Value'] < 0]
-                    status_df['Abs_Deviation_Value'] = abs(status_df['Stock Deviation Value'])
-                    status_df = status_df.sort_values(by='Abs_Deviation_Value', ascending=False).head(top_n)
-                    chart_title = f"Top {top_n} Short Inventory Parts (₹ Shortage Value in {unit_name})"
-                    y_title = f"Shortage Value (₹ {unit_name})"
+                    status_df['Abs_Dev'] = abs(status_df['Stock Deviation Value'])
+                    status_df = status_df.sort_values(by='Abs_Dev', ascending=False).head(top_n)
                 
-                if status_df.empty:
-                    st.info(f"No data found for '{status}' parts.")
-                    continue
-                
-                # Convert Values
-                if status == "Excess Inventory":
-                    status_df['Value_Converted'] = status_df['Stock Deviation Value'] / divisor
-                    hover_value = status_df['Stock Deviation Value']
-                else:
-                    status_df['Value_Converted'] = status_df['Abs_Deviation_Value'] / divisor
-                    hover_value = status_df['Abs_Deviation_Value']
-                
-                # ✅ Calculate Ideal Inventory for these parts to overlay
-                def get_ideal_val(row):
-                    ac = float(row.get('AVG CONSUMPTION/DAY', 0) or 0)
-                    up = float(row.get('UNIT PRICE', 0) or 0)
-                    return (ac * ideal_days * up) / divisor
-                
-                status_df['Ideal_Value_Converted'] = status_df.apply(get_ideal_val, axis=1)
+                if status_df.empty: continue
 
+                # Logic Change: Bar shows Total Current Value
+                status_df['Value_Converted'] = status_df[value_col] / divisor
+                status_df['Ideal_Val_Converted'] = status_df.apply(lambda r: (float(r.get('AVG CONSUMPTION/DAY', 0) or 0) * ideal_days * float(r.get('UNIT PRICE', 0) or 0)) / divisor, axis=1)
                 status_df['PART_DESC_NO'] = status_df['PART DESCRIPTION'].astype(str) + " (" + status_df['PART NO'].astype(str) + ")"
                 
                 status_df['HOVER_TEXT'] = status_df.apply(lambda row: (
-                    f"Description: {row.get('PART DESCRIPTION', 'N/A')}<br>"
-                    f"Part No: {row.get('PART NO')}<br>"
-                    f"{'Excess' if status == 'Excess Inventory' else 'Shortage'} Value: ₹{hover_value.loc[row.name]:,.0f}<br>"
-                    f"Ideal Value Target: ₹{(row['Ideal_Value_Converted'] * divisor):,.0f}"
+                    f"Description: {row.get('PART DESCRIPTION', 'N/A')}<br>Part No: {row.get('PART NO')}<br>"
+                    f"Actual Value: ₹{row[value_col]:,.0f}<br>Ideal Target: ₹{(row['Ideal_Val_Converted'] * divisor):,.0f}<br>"
+                    f"{status.split()[0]} Amount: ₹{abs(row['Stock Deviation Value']):,.0f}"
                 ), axis=1)
                 
-                # Use Graph Objects for mixed traces
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=status_df['PART_DESC_NO'],
-                    y=status_df['Value_Converted'],
-                    marker_color=color,
-                    hovertemplate='<b>%{x}</b><br>%{customdata}<extra></extra>',
-                    customdata=status_df['HOVER_TEXT'],
-                    name='Deviation Value'
-                ))
-                
-                # ✅ Add Ideal Inventory Line Overlay
-                fig.add_trace(go.Scatter(
-                    x=status_df['PART_DESC_NO'],
-                    y=status_df['Ideal_Value_Converted'],
-                    mode='lines+markers',
-                    name='Ideal Inventory',
-                    line=dict(color='black', width=1.5),
-                    marker=dict(symbol='circle', size=5, color='black'),
-                    hovertemplate='<b>Ideal Target</b><br>Value: %{y:.2f} ' + suffix + '<extra></extra>'
-                ))
+                fig3 = go.Figure()
+                fig3.add_trace(go.Bar(x=status_df['PART_DESC_NO'], y=status_df['Value_Converted'], marker_color=color, name='Actual Value', customdata=status_df['HOVER_TEXT'], hovertemplate='<b>%{x}</b><br>%{customdata}<extra></extra>'))
+                fig3.add_trace(go.Scatter(x=status_df['PART_DESC_NO'], y=status_df['Ideal_Val_Converted'], mode='lines+markers', name='Ideal Target', line=dict(color='black', width=1.5), marker=dict(symbol='circle', size=5, color='black')))
+                fig3.update_layout(title=f"Top {top_n} {status} Parts: Actual vs Target", xaxis_tickangle=-45, yaxis_title=f"Value (₹ {unit_name})", yaxis=dict(tickformat=',.1f', ticksuffix=suffix), height=600, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig3, use_container_width=True, key=f"{status.lower().replace(' ', '_')}_parts")
+        except Exception as e: st.error("❌ Error in Parts Status Charts")
 
-                fig.update_layout(
-                    title=chart_title,
-                    xaxis_tickangle=-45,
-                    yaxis_title=y_title,
-                    yaxis=dict(
-                        tickformat=',.1f',
-                        ticksuffix=suffix
-                    ),
-                    height=600, # Explicit height
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
-                st.plotly_chart(fig, use_container_width=True, key=f"{status.lower().replace(' ', '_')}_parts")
-        except Exception as e:
-            st.error("❌ Error displaying Top Parts by Status")
-            st.code(str(e))
-          
-        # ✅ 4. Top N Vendors by Inventory Status (With Ideal Line Overlay)
+        # ✅ 4. Top N Vendors by Inventory Status (FIXED HOVER)
         try:
             st.markdown(f"## 🏢 Top {top_n} Vendors by Inventory Status")
-            
-            # Define configurations for the two charts
-            chart_configs = [
-                ("Excess Inventory", "Excess Value Above Norm", self.status_colors["Excess Inventory"]),
-                ("Short Inventory", "Short Value Below Norm", self.status_colors["Short Inventory"]),
-            ]
-            
-            for status, metric_name, color in chart_configs:
-                # 1. Filter Data for specific status
+            for status, metric_name, color in [("Excess Inventory", "Excess Value Above Norm", "#2196F3"), ("Short Inventory", "Short Value Below Norm", "#F44336")]:
                 status_df = df[df['INVENTORY REMARK STATUS'] == status].copy()
-                
-                if status_df.empty:
-                    st.info(f"No vendors found for {status}")
-                    continue
+                if status_df.empty: continue
 
-                # 2. Group by Vendor and Calculate Metrics
                 vendor_stats = []
-                
-                # Check which column holds the Vendor Name
-                v_col = next((c for c in ['Vendor Name', 'Vendor', 'VENDOR'] if c in df.columns), 'Vendor Name')
+                for vendor, group in status_df.groupby(vendor_col):
+                    actual_sum = group[value_col].sum()
+                    ideal_sum = sum(float(r.get('AVG CONSUMPTION/DAY', 0) or 0) * ideal_days * float(r.get('UNIT PRICE', 0) or 0) for _, r in group.iterrows())
+                    # Sort by the magnitude of deviation
+                    dev_sum = abs(group['Stock Deviation Value'].sum())
+                    vendor_stats.append({
+                        'Vendor': vendor, 
+                        'Actual_Value': actual_sum, 
+                        'Ideal_Value': ideal_sum, 
+                        'Dev_Value': dev_sum
+                    })
 
-                for vendor, group in status_df.groupby(v_col):
-                    # Calculate Deviation Value (Excess amount or Shortage amount)
-                    deviation_sum = 0
-                    ideal_sum = 0
-                    
-                    for _, row in group.iterrows():
-                        # Extract basic metrics
-                        curr_qty = float(row.get('Current Inventory - Qty', 0) or 0)
-                        norm_qty = float(row.get('Revised Norm Qty', 0) or 0) # Use Revised Norm
-                        unit_price = float(row.get('UNIT PRICE', 0) or 0)
-                        avg_cons = float(row.get('AVG CONSUMPTION/DAY', 0) or 0)
-                        
-                        # Calculate Deviation Value
-                        if status == "Excess Inventory":
-                            # Value of stock ABOVE the norm
-                            if curr_qty > norm_qty:
-                                deviation_sum += (curr_qty - norm_qty) * unit_price
-                        else: # Short Inventory
-                            # Value of stock BELOW the norm
-                            if norm_qty > curr_qty:
-                                deviation_sum += (norm_qty - curr_qty) * unit_price
-                        
-                        # Calculate Ideal Inventory Value for these specific parts
-                        ideal_sum += (avg_cons * ideal_days * unit_price)
-
-                    if deviation_sum > 0:
-                        vendor_stats.append({
-                            'Vendor': vendor,
-                            'Deviation_Value': deviation_sum,
-                            'Ideal_Value': ideal_sum
-                        })
-
-                # 3. Create DataFrame, Sort and Slice Top N
-                if not vendor_stats:
-                    st.info(f"No significant values found for {status}")
-                    continue
-                    
-                v_df = pd.DataFrame(vendor_stats)
-                v_df = v_df.sort_values(by='Deviation_Value', ascending=False).head(top_n)
-                
-                # 4. Convert Units
-                v_df['Val_Converted'] = v_df['Deviation_Value'] / divisor
+                v_df = pd.DataFrame(vendor_stats).sort_values(by='Dev_Value', ascending=False).head(top_n)
+                v_df['Actual_Converted'] = v_df['Actual_Value'] / divisor
                 v_df['Ideal_Converted'] = v_df['Ideal_Value'] / divisor
+
+                # Create custom data for the hover to show full currency values
+                v_df['Hover_Text'] = v_df.apply(lambda r: (
+                    f"Vendor: {r['Vendor']}<br>"
+                    f"Total Actual: ₹{r['Actual_Value']:,.0f}<br>"
+                    f"Total Ideal Target: ₹{r['Ideal_Value']:,.0f}"
+                ), axis=1)
+
+                fig4 = go.Figure()
                 
-                # 5. Build Graph
-                fig = go.Figure()
-                
-                # Bar: Deviation Value
-                fig.add_trace(go.Bar(
-                    x=v_df['Vendor'],
-                    y=v_df['Val_Converted'],
-                    name=metric_name,
+                # Corrected Bar Trace
+                fig4.add_trace(go.Bar(
+                    x=v_df['Vendor'], 
+                    y=v_df['Actual_Converted'], 
+                    name='Total Actual Value', 
                     marker_color=color,
-                    hovertemplate=f'<b>{{x}}</b><br>{metric_name}: ₹{{y:,.1f}} {suffix}<extra></extra>'
+                    customdata=v_df['Hover_Text'],
+                    hovertemplate='<b>%{x}</b><br>%{customdata}<extra></extra>'
                 ))
                 
-                # Line: Ideal Inventory
-                fig.add_trace(go.Scatter(
-                    x=v_df['Vendor'],
-                    y=v_df['Ideal_Converted'],
-                    mode='lines+markers',
-                    name=f'Ideal Inventory ({ideal_days} Days)',
-                    line=dict(color='black', width=1.5),
+                # Corrected Scatter Trace
+                fig4.add_trace(go.Scatter(
+                    x=v_df['Vendor'], 
+                    y=v_df['Ideal_Converted'], 
+                    mode='lines+markers', 
+                    name='Total Ideal Target', 
+                    line=dict(color='black', width=1.5), 
                     marker=dict(symbol='circle', size=6, color='black'),
-                    hovertemplate=f'<b>Ideal Target</b><br>Value: ₹{{y:,.1f}} {suffix}<extra></extra>'
+                    hovertemplate='<b>Ideal Target</b><br>Value: ₹%{y:,.1f} ' + suffix + '<extra></extra>'
                 ))
-                
-                # Update Layout
-                fig.update_layout(
-                    title=f"Top {top_n} Vendors - {metric_name} vs Ideal Target",
-                    xaxis_title="Vendor",
-                    yaxis_title=f"Value (₹ {unit_name})",
-                    xaxis_tickangle=-45,
-                    yaxis=dict(tickformat=',.1f', ticksuffix=suffix),
-                    height=600, # Fixed height
+
+                fig4.update_layout(
+                    title=f"Top {top_n} Vendors: {status} (Actual vs Target)", 
+                    xaxis_title="Vendor", 
+                    yaxis_title=f"Value (₹ {unit_name})", 
+                    xaxis_tickangle=-45, 
+                    yaxis=dict(tickformat=',.1f', ticksuffix=suffix), 
+                    height=600, 
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
-                
-                st.plotly_chart(fig, use_container_width=True, key=f"vendor_{status}_chart")
-
-        except Exception as e:
-            st.error("❌ Error displaying Top Vendors by Status")
-            st.code(str(e))
-
+                st.plotly_chart(fig4, use_container_width=True, key=f"vendor_{status.lower().replace(' ', '_')}_chart")
+        except Exception as e: 
+            st.error("❌ Error in Vendor Status Charts")
+            
 if __name__ == "__main__":
     app = InventoryManagementSystem()
     app.run()  # This runs the full dashboard
